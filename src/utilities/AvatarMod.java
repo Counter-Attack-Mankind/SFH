@@ -38,6 +38,8 @@ import java.util.Set;
 /** Transactional resource + AVM2 implementation of the reusable Avatar Mod. */
 public final class AvatarMod {
     private static final List<Integer> CUSTOM_FRAMES = customFramePool();
+    // Runtime traces can be enabled temporarily when diagnosing avatar selection.
+    private static final boolean DEBUG_AVATAR = false;
     public record Applied(AvatarConfig.Rule rule, int skin, int originalFrame,
                           SwfBitmapImporter.FrameAsset asset) {}
     public record Outcome(Path output, Path report, String inputSha256, String outputSha256,
@@ -52,6 +54,7 @@ public final class AvatarMod {
             SWF swf = new SWF(input, false);
             SwfAvatarMapper.validateOriginal(swf);
             locateSetSkin(swf);
+            locateMenuInit(swf);
             for (AvatarConfig.Rule rule : config.rules) {
                 // Decode now, not after the SWF has been modified.
                 if (javax.imageio.ImageIO.read(rule.image(root).toFile()) == null) {
@@ -94,6 +97,7 @@ public final class AvatarMod {
                 }
             }
             injectRules(swf, applied);
+            injectMenuRules(swf, applied);
             try (BufferedOutputStream output = new BufferedOutputStream(new FileOutputStream(partial.toFile()))) {
                 swf.saveTo(output);
             }
@@ -137,15 +141,29 @@ public final class AvatarMod {
         AVM2Code code = method.code;
         AVM2ConstantPool pool = method.abc.constants;
         int insertion = locateHeadSetPart(code, pool) + 1;
-        int unit = publicQName(pool, "unit");
+        int unit = unitPrivateTraitQName(method.abc);
         int human = publicQName(pool, "human");
         int team = publicQName(pool, "team");
         int game = publicQName(pool, "game");
         int player = publicQName(pool, "player");
         int head = findMultiname(pool, "head");
         int setPart = findMultiname(pool, "setPart");
+        int trace = DEBUG_AVATAR ? publicQName(pool, "trace") : -1;
         List<AVM2Instruction> injected = new ArrayList<>();
         List<Branch> branches = new ArrayList<>();
+
+        if (DEBUG_AVATAR) {
+            // Global trace() in AVM2: findpropstrict trace; <value>; callpropvoid trace,1.
+            appendDebugText(injected, pool, trace, "[AvatarDebug] setSkin ENTER");
+            appendDebugText(injected, pool, trace, "[AvatarDebug] originalFrame:");
+            appendDebugValue(injected, trace, ins("getlocal1"));
+            appendDebugText(injected, pool, trace, "[AvatarDebug] Unit.human:");
+            injected.add(ins("findpropstrict", trace));
+            injected.add(ins("getlocal0"));
+            injected.add(ins("getproperty", unit));
+            injected.add(ins("getproperty", human));
+            injected.add(ins("callpropvoid", trace, 1));
+        }
 
         for (Applied item : applied) {
             AVM2Instruction end = ins("nop");
@@ -161,6 +179,9 @@ public final class AvatarMod {
             injected.add(ins("getproperty", head));
             injected.add(number(item.asset.frame()));
             injected.add(ins("callpropvoid", setPart, 2));
+            if (DEBUG_AVATAR) {
+                appendDebugText(injected, pool, trace, "[AvatarDebug] MATCH customFrame=" + item.asset.frame());
+            }
             injected.add(end);
         }
         for (int i = 0; i < injected.size(); i++) {
@@ -176,6 +197,19 @@ public final class AvatarMod {
         method.body.max_stack = Math.max(method.body.max_stack, 4);
         method.body.setModified();
         ((Tag) method.abc.parentTag).setModified(true);
+    }
+
+    private static void appendDebugText(List<AVM2Instruction> out, AVM2ConstantPool pool,
+            int trace, String message) {
+        out.add(ins("findpropstrict", trace));
+        out.add(ins("pushstring", pool.addString(message)));
+        out.add(ins("callpropvoid", trace, 1));
+    }
+
+    private static void appendDebugValue(List<AVM2Instruction> out, int trace, AVM2Instruction value) {
+        out.add(ins("findpropstrict", trace));
+        out.add(value);
+        out.add(ins("callpropvoid", trace, 1));
     }
 
     private static void appendSideCondition(List<AVM2Instruction> out, List<Branch> branches,
@@ -255,6 +289,133 @@ public final class AvatarMod {
         return new MethodRef(abc, bodies.get(0), body, body.getCode());
     }
 
+    /** Resolve the menu initializer that updates the visible character preview. */
+    private static MethodRef locateMenuInit(SWF swf) {
+        List<ScriptPack> packs = new ArrayList<>();
+        for (ScriptPack pack : swf.getAS3Packs()) {
+            if ("Menu".equals(pack.getPathScriptName())) packs.add(pack);
+        }
+        if (packs.size() != 1) throw new IllegalStateException("Expected one Menu class, found " + packs.size());
+        ABC abc = packs.get(0).abc;
+        int classIndex = abc.findClassByName("Menu");
+        List<Integer> bodies = new ArrayList<>();
+        for (Trait trait : abc.instance_info.get(classIndex).instance_traits.traits) {
+            if (trait instanceof TraitMethodGetterSetter method
+                    && "Init".equals(name(abc.constants, trait.name_index))) {
+                bodies.add(abc.findBodyIndex(method.method_info));
+            }
+        }
+        if (bodies.size() != 1 || bodies.get(0) < 0) {
+            throw new IllegalStateException("Menu.Init was not uniquely resolved");
+        }
+        MethodBody body = abc.bodies.get(bodies.get(0));
+        return new MethodRef(abc, bodies.get(0), body, body.getCode());
+    }
+
+    /** Find the original menu preview headhold.gotoAndStop call without using hardcoded byte addresses. */
+    private static int locateMenuHeadCall(AVM2Code code, AVM2ConstantPool pool) {
+        List<Integer> matches = new ArrayList<>();
+        for (int i = 0; i < code.code.size(); i++) {
+            AVM2Instruction call = code.code.get(i);
+            if (!"callpropvoid".equals(call.definition.instructionName)
+                    || call.operands.length != 2 || call.operands[1] != 1
+                    || !"gotoAndStop".equals(name(pool, call.operands[0]))) continue;
+            // The receiver is this.menfr.char.headhold. The argument follows the receiver.
+            // Require the exact receiver chain immediately before the call, with a small allowance
+            // for the original frame expression/load.
+            boolean chain = false;
+            for (int j = Math.max(0, i - 12); j <= i - 4; j++) {
+                if (isProperty(code.code.get(j), pool, "menfr")
+                        && isProperty(code.code.get(j + 1), pool, "char")
+                        && isProperty(code.code.get(j + 2), pool, "headhold")) {
+                    chain = true; break;
+                }
+            }
+            if (chain) matches.add(i);
+        }
+        if (matches.size() != 1) {
+            throw new IllegalStateException("Expected exactly one Menu preview headhold.gotoAndStop, found " + matches);
+        }
+        return matches.get(0);
+    }
+
+    private static boolean isProperty(AVM2Instruction instruction, AVM2ConstantPool pool, String property) {
+        return "getproperty".equals(instruction.definition.instructionName)
+                && instruction.operands.length == 1
+                && property.equals(name(pool, instruction.operands[0]));
+    }
+
+    /** Apply local-player rules to the menu preview; no AI, ally, or enemy rule is applicable. */
+    private static void injectMenuRules(SWF swf, List<Applied> applied) throws Exception {
+        MethodRef method = locateMenuInit(swf);
+        AVM2Code code = method.code;
+        AVM2ConstantPool pool = method.abc.constants;
+        int insertion = locateMenuHeadCall(code, pool) + 1;
+        int menfr = findMultiname(pool, "menfr");
+        int character = findMultiname(pool, "char");
+        int headhold = findMultiname(pool, "headhold");
+        int currentFrame = publicQName(pool, "currentFrame");
+        int gotoAndStop = publicQName(pool, "gotoAndStop");
+        List<AVM2Instruction> injected = new ArrayList<>();
+        List<Branch> branches = new ArrayList<>();
+        for (Applied item : applied) {
+            if (item.rule.side != AvatarConfig.Side.LOCAL_PLAYER
+                    && item.rule.side != AvatarConfig.Side.ALL) continue;
+            AVM2Instruction end = ins("nop");
+            // After the original gotoAndStop, currentFrame is the original class+skin frame.
+            appendMenuHeadReceiver(injected, menfr, character, headhold);
+            injected.add(ins("getproperty", currentFrame));
+            injected.add(number(item.originalFrame));
+            AVM2Instruction mismatch = ins("ifstrictne", 0);
+            injected.add(mismatch);
+            branches.add(new Branch(mismatch, end));
+            appendMenuHeadReceiver(injected, menfr, character, headhold);
+            injected.add(number(item.asset.frame()));
+            injected.add(ins("callpropvoid", gotoAndStop, 1));
+            injected.add(end);
+        }
+        for (int i = 0; i < injected.size(); i++) {
+            code.insertInstruction(insertion + i, injected.get(i), method.body);
+        }
+        code.markOffsets();
+        for (Branch branch : branches) {
+            branch.instruction.setTargetOffset((int) (branch.target.getAddress()
+                    - branch.instruction.getAddress() - branch.instruction.getBytesLength()));
+        }
+        code.markOffsets();
+        method.body.max_stack = Math.max(method.body.max_stack, 4);
+        method.body.setModified();
+        ((Tag) method.abc.parentTag).setModified(true);
+    }
+
+    private static void appendMenuHeadReceiver(List<AVM2Instruction> out,
+            int menfr, int character, int headhold) {
+        out.add(ins("getlocal0"));
+        out.add(ins("getproperty", menfr));
+        out.add(ins("getproperty", character));
+        out.add(ins("getproperty", headhold));
+    }
+
+    /** Resolve the existing private UnitMC.unit trait using its exact QName/namespace. */
+    private static int unitPrivateTraitQName(ABC abc) {
+        int classIndex = abc.findClassByName("UnitMC");
+        if (classIndex < 0) throw new IllegalStateException("UnitMC class not found");
+        int found = -1;
+        for (Trait trait : abc.instance_info.get(classIndex).instance_traits.traits) {
+            if ("unit".equals(name(abc.constants, trait.name_index))) {
+                if (found != -1) throw new IllegalStateException("Ambiguous UnitMC.unit traits");
+                found = trait.name_index;
+            }
+        }
+        if (found < 0) throw new IllegalStateException("UnitMC.unit instance trait not found");
+        Multiname multiname = abc.constants.getMultiname(found);
+        Namespace ns = abc.constants.getNamespace(multiname.namespace_index);
+        if (ns.kind != Namespace.KIND_PRIVATE) {
+            throw new IllegalStateException("Expected private UnitMC.unit namespace, kind=" + ns.kind);
+        }
+        return found;
+    }
+
     private static int publicQName(AVM2ConstantPool pool, String property) {
         int namespace = -1;
         for (int i = 1; i < pool.getNamespaceCount(); i++) {
@@ -320,18 +481,36 @@ public final class AvatarMod {
             unchanged++;
         }
         MethodRef beforeMethod = locateSetSkin(original), afterMethod = locateSetSkin(output);
+        MethodRef beforeMenu = locateMenuInit(original), afterMenu = locateMenuInit(output);
+        if (Arrays.equals(beforeMenu.body.getCodeBytes(), afterMenu.body.getCodeBytes())) {
+            throw new IllegalStateException("Menu.Init preview selector was not modified");
+        }
+        verifyMenuSelector(afterMenu, expected);
         if (Arrays.equals(beforeMethod.body.getCodeBytes(), afterMethod.body.getCodeBytes())) {
             throw new IllegalStateException("UnitMC.setSkin was not modified");
         }
         verifySelector(afterMethod, expected);
+        if (beforeMenu.abc.bodies.size() != afterMenu.abc.bodies.size()) {
+            throw new IllegalStateException("Menu ABC method-body count changed");
+        }
         if (beforeMethod.abc.bodies.size() != afterMethod.abc.bodies.size()) {
             throw new IllegalStateException("AVM2 method-body count changed");
         }
         for (int i = 0; i < beforeMethod.abc.bodies.size(); i++) {
-            if (i == beforeMethod.bodyIndex) continue;
+            if (i == beforeMethod.bodyIndex ||
+                    (beforeMenu.abc == beforeMethod.abc && i == beforeMenu.bodyIndex)) continue;
             if (!Arrays.equals(beforeMethod.abc.bodies.get(i).getCodeBytes(),
                     afterMethod.abc.bodies.get(i).getCodeBytes())) {
                 throw new IllegalStateException("Unexpected AVM2 method change at body " + i);
+            }
+        }
+        if (beforeMenu.abc != beforeMethod.abc) {
+            for (int i = 0; i < beforeMenu.abc.bodies.size(); i++) {
+                if (i == beforeMenu.bodyIndex) continue;
+                if (!Arrays.equals(beforeMenu.abc.bodies.get(i).getCodeBytes(),
+                        afterMenu.abc.bodies.get(i).getCodeBytes())) {
+                    throw new IllegalStateException("Unexpected Menu ABC method change at body " + i);
+                }
             }
         }
         compareWeapons(original, output);
@@ -342,7 +521,26 @@ public final class AvatarMod {
         System.out.println("ORIGINAL_CHARACTERS_IDENTICAL=" + unchanged);
         System.out.println("CUSTOM_FRAMES=" + expected.size());
         System.out.println("UNITMC_INSTANCE_SELECTOR=true");
+        System.out.println("MENU_PREVIEW_SELECTOR=true");
         System.out.println("WEAPON_REGISTRY_IDENTICAL=true");
+    }
+
+    private static void verifyMenuSelector(MethodRef method, List<Applied> expected) {
+        AVM2ConstantPool pool = method.abc.constants;
+        for (Applied item : expected) {
+            if (item.rule.side != AvatarConfig.Side.LOCAL_PLAYER
+                    && item.rule.side != AvatarConfig.Side.ALL) continue;
+            int matches = 0;
+            for (int i = 0; i + 1 < method.code.code.size(); i++) {
+                Double value = Avm2ConstantEditor.readConstant(pool, method.code.code.get(i));
+                AVM2Instruction next = method.code.code.get(i + 1);
+                if (value != null && value.intValue() == item.asset.frame()
+                        && "callpropvoid".equals(next.definition.instructionName)
+                        && "gotoAndStop".equals(name(pool, next.operands[0]))) matches++;
+            }
+            if (matches != 1) throw new IllegalStateException("Menu preview frame "
+                    + item.asset.frame() + " was not selected exactly once");
+        }
     }
 
     private static void verifySelector(MethodRef method, List<Applied> expected) {
@@ -358,6 +556,20 @@ public final class AvatarMod {
             }
             if (matches != 1) throw new IllegalStateException("Custom frame " + item.asset.frame()
                     + " is not selected exactly once in UnitMC.setSkin");
+        }
+        int privateUnit = unitPrivateTraitQName(method.abc);
+        boolean privateUnitRead = false;
+        for (AVM2Instruction instruction : method.code.code) {
+            if ("getproperty".equals(instruction.definition.instructionName)
+                    && instruction.operands[0] == privateUnit) privateUnitRead = true;
+            if ("getproperty".equals(instruction.definition.instructionName)
+                    && "unit".equals(name(pool, instruction.operands[0]))
+                    && instruction.operands[0] != privateUnit) {
+                throw new IllegalStateException("UnitMC.unit accessed via wrong namespace");
+            }
+        }
+        if (expected.stream().anyMatch(item -> item.rule.side != AvatarConfig.Side.ALL) && !privateUnitRead) {
+            throw new IllegalStateException("Identity selector does not access private UnitMC.unit");
         }
         Set<String> properties = new HashSet<>();
         for (AVM2Instruction instruction : method.code.code) {
