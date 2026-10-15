@@ -1,0 +1,13 @@
+{
+  "mod_id": "usp_damage_test",
+  "description": "Increase USP base damage",
+  "target": {
+    "class": "Stats_Guns",
+    "method": "Init",
+    "weapon": "USP",
+    "field": "damage"
+  },
+  "expected_original": 15,
+  "new_value": 100,
+  "output": "builds/SFH2_USP100.swf"
+}

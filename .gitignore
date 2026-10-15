@@ -1,0 +1,19 @@
+# Generated build products and reports
+builds/*.swf
+builds/*.build.json
+
+# Local caches and reverse-engineering scratch data
+.cache/
+.work/
+
+# Original/proprietary game data is intentionally never committed
+original/*.swf
+decompiled/
+
+# Bundled local tools
+tools/
+
+# Editor/OS noise
+*.log
+Thumbs.db
+.DS_Store
