@@ -16,6 +16,7 @@ if (-not $SkipLegacy) {
     $suites += 'tests/test-usp-patch.ps1'
 }
 $suites += 'tests/test-weapon-pack.ps1'
+$suites += 'tests/test-avatar-mod.ps1'
 
 $failed = @()
 foreach ($suite in $suites) {

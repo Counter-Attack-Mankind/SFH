@@ -48,7 +48,10 @@ public final class Avm2Dump {
                 ABC abc = packs.get(0).abc;
                 int classIndex = abc.findClassByName(className);
                 int bodyIndex = -1;
-                for (Trait trait : abc.class_info.get(classIndex).static_traits.traits) {
+                List<Trait> methodTraits = new ArrayList<>();
+                methodTraits.addAll(abc.class_info.get(classIndex).static_traits.traits);
+                methodTraits.addAll(abc.instance_info.get(classIndex).instance_traits.traits);
+                for (Trait trait : methodTraits) {
                     if (!(trait instanceof TraitMethodGetterSetter m)) {
                         continue;
                     }

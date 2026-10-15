@@ -114,13 +114,13 @@ Assert-True 'built SWF exists' (Test-Path -LiteralPath (Join-Path $layout.Root $
 
 $verify = Invoke-JavaTool @('verify-config', $happyConfig, $layout.Root)
 Assert-True 'verify-config succeeds on the built SWF' ($verify.ExitCode -eq 0) $verify.Output
-foreach ($expected in @(
-        'VERIFIED USP.damage = 500',
-        'VERIFIED USP.clipSize = 30',
-        'VERIFIED USP.shootDelay = 0.1',
-        'VERIFIED USP.recoil = 0',
-        'VERIFIED M4.damage = 200',
-        'VERIFIED M4.range = 300')) {
+$happyModel = Get-Content -Raw -Encoding UTF8 -LiteralPath $happyConfig | ConvertFrom-Json
+$expectedVerified = foreach ($weapon in $happyModel.weapons) {
+    foreach ($field in $weapon.changes.PSObject.Properties) {
+        "VERIFIED $($weapon.id).$($field.Name) = $($field.Value.value)"
+    }
+}
+foreach ($expected in $expectedVerified) {
     Assert-True "re-parsed value: $expected" ($verify.Output -match [regex]::Escape($expected))
 }
 Assert-True 'isolation check passes' ($verify.Output -match 'ISOLATION_CHECK=OK')

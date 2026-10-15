@@ -1,0 +1,12 @@
+{
+  "mod_id": "custom_avatar_pack",
+  "description": "Local player medic avatar; AI and other classes retain original heads.",
+  "input": "original/SFH_CN_Fixed.swf",
+  "output": "builds/SFH_CustomAvatars.swf",
+  "avatars": [
+    {
+      "target": { "side": "local_player", "class": "medic", "skins": "all" },
+      "image": "assets/avatars/medic_head.png"
+    }
+  ]
+}
