@@ -51,3 +51,26 @@ Unit
 
 - 反编译器插入的 `§§push/§§pop` 令部分分支次序看起来异常，尤其是 `Game.EnterFrame` 的随机换队段和大型注册函数。文档不重构这些分支。
 - `Unit.setDiffStats`、`spawn`、`getNextWaypoint` 在基类为空实现，由 `Player`/`AI` 覆盖；不能把基类空方法误判为功能缺失。
+
+## MOD 构建器结构（v0.2）
+
+```text
+src/utilities/
+├── SwfGunPatcher.java        CLI 入口与参数解析（patch / verify / patch-config / verify-config /
+│                             validate-config / list-weapons / list-fields）
+├── WeaponRegistry.java       可达性分析 + 常量传播的操作数栈抽象解释；解析全部 addGun 注册
+├── WeaponField.java          属性表：形参序号、对象字段、赋值语句、类型、无符号标志、取值区间；
+│                             以及被明确拒绝的属性及其原因
+├── Avm2ConstantEditor.java   数值编码（pushbyte/pushshort/pushint/pushuint/pushdouble）、
+│                             追加常量池条目、构造替换指令
+├── WeaponPackConfig.java     批量 JSON 解析与全部与 SWF 无关的校验
+├── WeaponPackPatcher.java    事务化构建、原版隔离比对、构建报告、verify/validate
+├── JsonLint.java             重复 JSON 成员检测
+├── Avm2Dump.java             只读字节码转储（开发工具）
+└── StackProbe.java           只读操作数栈追踪（开发工具）
+```
+
+`SwfGunPatcher` 的 v0.1 单补丁路径（`patch` / `verify` 共 9 / 7 个参数）保持原样，因此历史配置与自动化测试不受影响。v0.2 批量路径完全走 `WeaponPackPatcher`，二者共享 `WeaponRegistry` 的定位结果。
+
+字节码改写一律经由 FFDec 的结构化 API（`AVM2Code.replaceInstruction` + `MethodBody.setModified` + `Tag.setModified`），不直接写原始字节数组；指令长度变化后的分支偏移、异常表范围与方法元数据由 FFDec 重新计算。
+

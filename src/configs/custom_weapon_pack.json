@@ -1,0 +1,42 @@
+{
+  "mod_id": "custom_weapon_pack",
+  "description": "Demonstration weapon pack: overpowered USP plus a longer-ranged, harder-hitting M4. Every original value below was read from the real addGun registration in Stats_Guns.Init, not guessed.",
+  "input": "original/SFH_CN_Fixed.swf",
+  "output": "builds/SFH2_CustomWeapons.swf",
+  "weapons": [
+    {
+      "id": "USP",
+      "changes": {
+        "damage": {
+          "expected": 15,
+          "value": 500
+        },
+        "clipSize": {
+          "expected": 12,
+          "value": 30
+        },
+        "shootDelay": {
+          "expected": 0.25,
+          "value": 0.1
+        },
+        "recoil": {
+          "expected": 3,
+          "value": 0
+        }
+      }
+    },
+    {
+      "id": "M4",
+      "changes": {
+        "damage": {
+          "expected": 10,
+          "value": 200
+        },
+        "range": {
+          "expected": 60,
+          "value": 300
+        }
+      }
+    }
+  ]
+}

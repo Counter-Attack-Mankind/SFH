@@ -8,6 +8,6 @@
     "field": "damage"
   },
   "expected_original": 15,
-  "new_value": 100,
-  "output": "builds/SFH2_USP100.swf"
+  "new_value": 127,
+  "output": "builds/SFH2_USP127.swf"
 }

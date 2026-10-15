@@ -6,13 +6,39 @@ param(
 
 $layout = Get-ProjectLayout
 Assert-ProjectTooling $layout
+$configPath = Resolve-ConfigPath $layout $Config
+Compile-SwfPatcher $layout
+
+if (Test-WeaponPackConfig $configPath) {
+    # v0.2 batch schema: one JSON file, many weapons and many attributes. The Java tool owns the
+    # whole transaction (resolve -> validate -> rewrite -> re-parse -> verify -> publish) and also
+    # writes the build report, so this script only runs it and surfaces the outcome.
+    $pack = Get-Content -Raw -Encoding UTF8 -LiteralPath $configPath | ConvertFrom-Json
+    $output = Resolve-SafeOutput $layout $pack.output
+    $reportPath = "${output}.build.json"
+
+    try {
+        $result = Invoke-SwfPatcher $layout @('patch-config', $configPath, $layout.Root)
+        Write-Host "Build succeeded: $output"
+        Write-Host "Weapons resolved: $($result.WEAPONS_RESOLVED)"
+        Write-Host "Arguments compared: $($result.ARGUMENTS_COMPARED)"
+        Write-Host "Changes applied: $($result.CHANGES)"
+        Write-Host "Static verification: passed (every target re-parsed from the written SWF)"
+        Write-Host "Runtime verification: manual test required"
+        Write-Host "Report: $reportPath"
+    } catch {
+        Write-Error $_
+        exit 1
+    }
+    return
+}
+
+# v0.1 single-patch schema, kept unchanged so the historical USP builds and their tests still work.
 $loaded = Read-ModConfig $layout $Config
 $mod = $loaded.Value
 $output = Resolve-SafeOutput $layout $mod.output
 $reportPath = [IO.Path]::ChangeExtension($output, '.build.json')
 Remove-Item -LiteralPath $reportPath -Force -ErrorAction SilentlyContinue
-
-Compile-SwfPatcher $layout
 
 $arguments = @(
     'patch',

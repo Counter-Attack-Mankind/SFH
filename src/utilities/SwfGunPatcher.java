@@ -59,6 +59,27 @@ public final class SwfGunPatcher {
 
     public static void main(String[] args) {
         try {
+            if (args.length >= 2 && "list-weapons".equalsIgnoreCase(args[0])) {
+                listWeapons(Path.of(args[1]));
+                return;
+            }
+            if (args.length >= 2 && "list-fields".equalsIgnoreCase(args[0])) {
+                listFields();
+                return;
+            }
+            if (args.length >= 3 && "patch-config".equalsIgnoreCase(args[0])) {
+                patchConfig(Path.of(args[1]), Path.of(args[2]));
+                return;
+            }
+            if (args.length >= 3 && "validate-config".equalsIgnoreCase(args[0])) {
+                validateConfig(Path.of(args[1]), Path.of(args[2]));
+                return;
+            }
+            if (args.length >= 3 && "verify-config".equalsIgnoreCase(args[0])) {
+                verifyConfig(Path.of(args[1]), Path.of(args[2]),
+                        args.length >= 4 ? Path.of(args[3]) : null);
+                return;
+            }
             Options options = parseArgs(args);
             Result result = run(options);
             System.out.println("STATUS=OK");
@@ -297,6 +318,100 @@ public final class SwfGunPatcher {
                     Integer.parseInt(args[6]), Integer.parseInt(args[6]));
         }
         throw new IllegalArgumentException("Invalid mode or argument count");
+    }
+
+    /** Batch build from a weapon pack configuration file. */
+    private static void patchConfig(Path configFile, Path projectRoot) throws Exception {
+        WeaponPackPatcher.Outcome outcome = WeaponPackPatcher.build(configFile, projectRoot);
+        System.out.println("STATUS=OK");
+        System.out.println("MODE=patch-config");
+        System.out.println("CONFIG=" + configFile.toAbsolutePath().normalize());
+        System.out.println("PROJECT_ROOT=" + projectRoot.toAbsolutePath().normalize());
+        System.out.println("INPUT=" + outcome.input);
+        System.out.println("INPUT_SHA256=" + outcome.inputSha256);
+        System.out.println("OUTPUT=" + outcome.output);
+        System.out.println("OUTPUT_SHA256=" + outcome.outputSha256);
+        System.out.println("REPORT=" + outcome.report);
+        System.out.println("WEAPONS_RESOLVED=" + outcome.weaponsResolved);
+        System.out.println("ARGUMENTS_COMPARED=" + outcome.argumentsCompared);
+        System.out.println("UNEXPECTED_DIFFERENCES=0");
+        System.out.println("CHANGES=" + outcome.lines.size());
+        for (String line : outcome.lines) {
+            System.out.println("  " + line);
+        }
+        System.out.println("RUNTIME_STATUS=manual_test_required");
+    }
+
+    /** Read-only dry run of a weapon pack configuration; used by the Validate Config task. */
+    private static void validateConfig(Path configFile, Path projectRoot) throws Exception {
+        int changes = WeaponPackPatcher.validate(configFile, projectRoot);
+        System.out.println("STATUS=OK");
+        System.out.println("MODE=validate-config");
+        System.out.println("CONFIG=" + configFile.toAbsolutePath().normalize());
+        System.out.println("CHANGES=" + changes);
+    }
+
+    /** Verifies a previously built weapon pack SWF; used by the Verify MOD task. */    private static void verifyConfig(Path configFile, Path projectRoot, Path override) throws Exception {
+        System.out.println("STATUS=OK");
+        System.out.println("MODE=verify-config");
+        System.out.println("CONFIG=" + configFile.toAbsolutePath().normalize());
+        WeaponPackPatcher.verify(configFile, projectRoot, override);
+    }
+
+    /** Documents which attributes can be patched and which are refused, with the reason. */
+    private static void listFields() {
+        System.out.println("SUPPORTED_FIELDS");
+        for (WeaponField field : WeaponField.all()) {
+            System.out.println("  " + pad(field.name, 12) + " addGun param" + pad(Integer.toString(field.param), 4)
+                    + pad(field.type == WeaponField.Type.INTEGER ? "integer" : "number", 10)
+                    + "range " + pad(field.describeRange(), 22) + field.assignment);
+        }
+        System.out.println("REFUSED_FIELDS");
+        for (java.util.Map.Entry<String, String> entry : WeaponField.refusedFields().entrySet()) {
+            System.out.println("  " + pad(entry.getKey(), 12) + entry.getValue());
+        }
+    }
+
+    private static String pad(String text, int width) {
+        StringBuilder builder = new StringBuilder(text);
+        while (builder.length() < width) {
+            builder.append(' ');
+        }
+        return builder.toString();
+    }
+
+    /** Read-only dump of every resolved addGun registration; used by the List Weapons task. */
+    private static void listWeapons(Path input) throws Exception {        if (!Files.isRegularFile(input)) {
+            throw new IllegalArgumentException("Input SWF does not exist: " + input);
+        }
+        try (BufferedInputStream stream = new BufferedInputStream(new FileInputStream(input.toFile()))) {
+            SWF swf = new SWF(stream, false);
+            WeaponRegistry.Resolution resolution = WeaponRegistry.resolve(swf);
+            String selfTest = WeaponRegistry.selfTest(resolution);
+            System.out.println("ADDGUN_CALLS=" + resolution.all.size());
+            System.out.println("RESOLVED_WEAPONS=" + resolution.byId.size());
+            System.out.println("ABC_METHOD_BODY_INDEX=" + resolution.bodyIndex);
+            System.out.println("RESOLVER_SELF_TEST=" + (selfTest == null ? "OK" : selfTest));
+            for (WeaponRegistry.Registration reg : resolution.all) {
+                if (!reg.resolved()) {
+                    System.out.println("UNRESOLVED\t0x" + Long.toHexString(reg.callAddress) + "\t" + reg.problem);
+                    continue;
+                }
+                WeaponRegistry.Slot[] args = reg.args;
+                StringBuilder shape = new StringBuilder();
+                for (int i = 0; i < WeaponRegistry.ARG_COUNT; i++) {
+                    if (i > 0) {
+                        shape.append(',');
+                    }
+                    shape.append(i + 1).append('=').append(args[i].display());
+                }
+                System.out.println("WEAPON\t" + reg.weaponId() + "\t" + reg.callIndex
+                        + "\t0x" + Long.toHexString(reg.callAddress) + "\t" + shape);
+            }
+            for (String problem : resolution.problems) {
+                System.out.println("PROBLEM=" + problem);
+            }
+        }
     }
 
     private static String sha256(Path path) throws Exception {

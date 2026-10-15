@@ -25,6 +25,27 @@ Invoke-SwfPatcher $layout $patchFirstArgs | Out-Null
 Invoke-SwfPatcher $layout $patchSecondArgs | Out-Null
 Invoke-SwfPatcher $layout $verifyFirstArgs | Out-Null
 
+# v0.1 compatibility: the historical 15 -> 127 patch must still build and verify through the
+# same single-patch schema that shipped before v0.2.
+$third = Join-Path $testRoot 'usp127.swf'
+Remove-Item -LiteralPath $third -Force -ErrorAction SilentlyContinue
+Invoke-SwfPatcher $layout (@('patch', $layout.Original, $third) + $common + @('15', '127')) | Out-Null
+$verified127 = Invoke-SwfPatcher $layout (@('verify', $third) + $common + @('127'))
+if ($verified127.VALUE -ne '127') {
+    throw "Expected the patched bytecode value to read back as 127 but got $($verified127.VALUE)"
+}
+Write-Host 'PASS: v0.1 15 -> 127 patch still builds and verifies'
+
+# Both shipped v0.1/v0.2 configuration files must still build through scripts/build.ps1.
+foreach ($legacy in @('src/configs/usp_damage_100.json', 'src/configs/usp_damage_test.json')) {
+    $legacyPath = Join-Path $layout.Root $legacy
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $layout.Root 'scripts/build.ps1') -Config $legacy
+    if ($LASTEXITCODE -ne 0) {
+        throw "Legacy config $legacy failed to build with exit code $LASTEXITCODE"
+    }
+    Write-Host "PASS: $legacy still builds through scripts/build.ps1"
+}
+
 $firstHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $first).Hash
 $secondHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $second).Hash
 if ($firstHash -ne $secondHash) {
